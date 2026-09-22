@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Build The Clean Trace as an EPUB. No cover image."""
+"""Build The Clean Trace as an EPUB.
+
+Reading copy only: no cover image, no table of contents, no part dividers, and
+no by-line. The book runs straight from the title page into Chapter 1.
+"""
 
 from __future__ import annotations
 
@@ -13,14 +17,6 @@ from ebooklib import epub
 ROOT = Path(__file__).resolve().parent
 MANUSCRIPT = ROOT / "manuscript"
 OUT = ROOT / "The-Clean-Trace.epub"
-
-PARTS = [
-    ("Part I", "The Green Board", range(1, 7)),
-    ("Part II", "The Residue", range(7, 12)),
-    ("Part III", "The Session", range(12, 17)),
-    ("Part IV", "The Cures", range(17, 24)),
-    ("Part V", "The Restraint", range(24, 30)),
-]
 
 CHAPTER_TITLES = {
     1: "Night Shift",
@@ -81,7 +77,7 @@ p {
   orphans: 2;
   widows: 2;
 }
-p.noindent, h2 + p, .chapter-title + p, .part-kicker + p {
+p.noindent, h2 + p, .chapter-title + p {
   text-indent: 0;
 }
 p.center {
@@ -106,19 +102,6 @@ p.center {
   font-size: 1.45em;
   margin: 0 0 2.2em;
 }
-.part-kicker {
-  font-variant: small-caps;
-  letter-spacing: 0.18em;
-  text-align: center;
-  font-size: 0.78em;
-  margin: 28% 0 0.4em;
-}
-.part-title {
-  text-align: center;
-  font-style: italic;
-  font-size: 1.6em;
-  margin: 0;
-}
 .title-main {
   font-size: 1.8em;
   letter-spacing: 0.08em;
@@ -130,12 +113,6 @@ p.center {
   text-align: center;
   font-style: italic;
   margin: 0 0 2em;
-}
-.title-author {
-  text-align: center;
-  letter-spacing: 0.12em;
-  font-variant: small-caps;
-  margin-top: 2.5em;
 }
 .note-title {
   text-align: center;
@@ -152,19 +129,6 @@ p.center {
   text-align: center;
   font-style: italic;
 }
-nav#toc ol {
-  list-style: none;
-  padding-left: 0;
-}
-nav#toc li {
-  margin: 0.35em 0;
-}
-.toc-part {
-  margin-top: 1.1em;
-  font-variant: small-caps;
-  letter-spacing: 0.08em;
-  font-size: 0.85em;
-}
 """
 
 NOTE_HTML = """
@@ -176,8 +140,7 @@ NOTE_HTML = """
 
 TITLE_HTML = """
 <p class="title-main">THE CLEAN TRACE</p>
-<p class="title-sub">A novel</p>
-<p class="title-author">Sven Hammann</p>
+<p class="title-sub">An AI Safety Thriller</p>
 """
 
 
@@ -276,6 +239,34 @@ def make_html(title: str, body: str, klass: str = "chapter") -> str:
     )
 
 
+def drop_orphan_toc_reference(path: Path) -> None:
+    """Remove the spine's toc="ncx" attribute, which ebooklib always writes.
+
+    With no table of contents there is no EPUB 2 NCX to point at, and an attribute
+    naming a manifest id that does not exist is a conformance error, so it has to
+    be taken out of the package document afterwards. Rewriting the archive keeps
+    the mimetype entry first and stored, exactly as ebooklib wrote it.
+    """
+    with zipfile.ZipFile(path) as src:
+        names = src.namelist()
+        payload = {name: src.read(name) for name in names}
+
+    opf_name = next(name for name in names if name.endswith(".opf"))
+    if "toc.ncx" in payload:
+        return  # an NCX really is in the package, so the reference is fine
+    fixed = payload[opf_name].replace(b' toc="ncx"', b"")
+    if fixed == payload[opf_name]:
+        return
+
+    payload[opf_name] = fixed
+    tmp = path.with_name(path.name + ".tmp")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as dst:
+        for name in names:
+            stored = zipfile.ZIP_STORED if name == "mimetype" else zipfile.ZIP_DEFLATED
+            dst.writestr(name, payload[name], compress_type=stored)
+    tmp.replace(path)
+
+
 def main() -> None:
     chapters = load_chapters()
     full = "\n".join(chapters.values())
@@ -285,7 +276,7 @@ def main() -> None:
     book.set_identifier("urn:uuid:01a0c773-clean-trace-2026")
     book.set_title("The Clean Trace")
     book.set_language("en")
-    book.add_author("Sven Hammann")
+    # No author: the reading copy carries no by-line, so no dc:creator either.
     book.add_metadata("DC", "description",
                       "A thriller set in a fictional frontier laboratory in September 2026. "
                       "The instruments meant to keep a reasoning model legible begin to fail, "
@@ -308,64 +299,53 @@ def main() -> None:
     book.add_item(note)
 
     chapter_items = {}
-    part_items = {}
-    for part_label, part_title, nums in PARTS:
-        pid = part_label.lower().replace(" ", "")
-        part = epub.EpubHtml(title=f"{part_label}: {part_title}", file_name=f"{pid}.xhtml", lang="en")
-        part.content = make_html(
-            part_title,
-            f'<p class="part-kicker">{html.escape(part_label)}</p>\n'
-            f'<h1 class="part-title">{html.escape(part_title)}</h1>',
-            "front",
+    for n in sorted(CHAPTER_TITLES):
+        item = epub.EpubHtml(
+            title=f"Chapter {n}: {CHAPTER_TITLES[n]}",
+            file_name=f"chapter-{n:02d}.xhtml",
+            lang="en",
         )
-        part.add_item(style)
-        book.add_item(part)
-        part_items[part_label] = part
-        for n in nums:
-            item = epub.EpubHtml(
-                title=f"Chapter {n}: {CHAPTER_TITLES[n]}",
-                file_name=f"chapter-{n:02d}.xhtml",
-                lang="en",
-            )
-            inner = (
-                f'<p class="chapter-num">Chapter {n}</p>\n'
-                f'<h1 class="chapter-title">{html.escape(CHAPTER_TITLES[n])}</h1>\n'
-                f"{body_to_html(chapters[n])}"
-            )
-            item.content = make_html(f"Chapter {n}. {CHAPTER_TITLES[n]}", inner)
-            item.add_item(style)
-            book.add_item(item)
-            chapter_items[n] = item
-
-    toc = [epub.Link("title.xhtml", "Title", "title")]
-    for part_label, part_title, nums in PARTS:
-        toc.append(
-            (
-                epub.Section(f"{part_label} — {part_title}"),
-                [chapter_items[n] for n in nums],
-            )
+        inner = (
+            f'<p class="chapter-num">Chapter {n}</p>\n'
+            f'<h1 class="chapter-title">{html.escape(CHAPTER_TITLES[n])}</h1>\n'
+            f"{body_to_html(chapters[n])}"
         )
-    toc.append(epub.Link("note.xhtml", "A Note", "note"))
-    book.toc = toc
+        item.content = make_html(f"Chapter {n}. {CHAPTER_TITLES[n]}", inner)
+        item.add_item(style)
+        book.add_item(item)
+        chapter_items[n] = item
 
-    book.spine = ["nav", title_page]
-    for part_label, _, nums in PARTS:
-        book.spine.append(part_items[part_label])
-        book.spine.extend(chapter_items[n] for n in nums)
+    # No table of contents: book.toc stays empty. The nav document is still added
+    # because EPUB 3 requires it, but it is kept out of the spine so it is not a
+    # page in the reading order. The EPUB 2 NCX is not written at all: with no
+    # entries its navMap would be invalid, and the spine only references it if it
+    # exists.
+    book.spine = [title_page]
+    book.spine.extend(chapter_items[n] for n in sorted(chapter_items))
     book.spine.append(note)
 
-    book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
     epub.write_epub(str(OUT), book, {})
+    drop_orphan_toc_reference(OUT)
 
     with zipfile.ZipFile(OUT) as zf:
         names = zf.namelist()
-        required = ["mimetype", "META-INF/container.xml", "EPUB/nav.xhtml", "EPUB/title.xhtml", "EPUB/chapter-01.xhtml", "EPUB/chapter-29.xhtml", "EPUB/note.xhtml"]
         # ebooklib may nest differently; check suffixes
         joined = "\n".join(names)
         for needle in ["mimetype", "container.xml", "nav.xhtml", "chapter-01.xhtml", "chapter-29.xhtml", "note.xhtml", "title.xhtml"]:
             if needle not in joined:
                 raise SystemExit(f"EPUB missing {needle}. Contents:\n{joined}")
+        for needle in ["parti.xhtml", "partii.xhtml", "partiii.xhtml", "partiv.xhtml", "partv.xhtml"]:
+            if needle in joined:
+                raise SystemExit(f"EPUB should not carry a part divider: {needle}")
+        opf = zf.read(next(name for name in names if name.endswith(".opf"))).decode("utf-8")
+        if 'idref="nav"' in opf:
+            raise SystemExit("EPUB spine should not carry the table of contents page")
+        if "<dc:creator" in opf:
+            raise SystemExit("EPUB metadata should not name an author")
+        title_page_html = zf.read(next(name for name in names if name.endswith("title.xhtml"))).decode("utf-8")
+        if "An AI Safety Thriller" not in title_page_html:
+            raise SystemExit("EPUB title page is missing the subtitle")
         if zf.read("mimetype") != b"application/epub+zip":
             raise SystemExit("mimetype is not stored correctly")
     print(f"Wrote {OUT} ({OUT.stat().st_size} bytes)")
